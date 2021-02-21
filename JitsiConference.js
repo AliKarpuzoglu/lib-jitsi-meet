@@ -1456,8 +1456,6 @@ JitsiConference.prototype.grantPermission = function(id, resource) {
         return;
     }
     this.room.sendPermissionUpdate(participant.getJid(), resource, true);
-    // store locally that this user got this permission granted
-    participant.setPermission(resource, true);
 };
 
 /**
@@ -1471,8 +1469,6 @@ JitsiConference.prototype.revokePermission = function(id, resource) {
         return;
     }
     this.room.sendPermissionUpdate(participant.getJid(), resource, false);
-    // store locally that this user got this permission revoked
-    participant.setPermission(resource, false);
 };
 
 /**
