@@ -631,6 +631,50 @@ TraceablePeerConnection.prototype.getRemoteTracks = function(
 };
 
 /**
+ * Parses the remote description and returns the sdp lines of the sources associated with a remote participant.
+ *
+ * @param {string} id Endpoint id of the remote participant.
+ * @returns {Array<string>} The sdp lines that have the ssrc information.
+ */
+TraceablePeerConnection.prototype.getRemoteSourceInfoByParticipant = function(id) {
+    const removeSsrcInfo = [];
+    const remoteTracks = this.getRemoteTracks(id);
+
+    if (!remoteTracks?.length) {
+        return removeSsrcInfo;
+    }
+    const primarySsrcs = remoteTracks.map(track => track.getSSRC());
+    const sdp = new SDP(this.remoteDescription.sdp);
+
+    for (const media of sdp.media) {
+        primarySsrcs.forEach((ssrc, idx) => {
+            let lines = '';
+            let ssrcLines = SDPUtil.findLines(media, `a=ssrc:${ssrc}`);
+
+            if (ssrcLines.length) {
+                if (!removeSsrcInfo[idx]) {
+                    removeSsrcInfo[idx] = '';
+                }
+
+                // Check if there are any FID groups are present for the primary ssrc.
+                const fidLines = SDPUtil.findLines(media, `a=ssrc-group:FID ${ssrc}`);
+
+                if (fidLines.length) {
+                    const secondarySsrc = fidLines[0].split(' ')[2];
+
+                    lines += `${fidLines[0]}\r\n`;
+                    ssrcLines = ssrcLines.concat(SDPUtil.findLines(media, `a=ssrc:${secondarySsrc}`));
+                }
+                removeSsrcInfo[idx] += `${ssrcLines.join('\r\n')}\r\n`;
+            }
+            removeSsrcInfo[idx] += lines;
+        });
+    }
+
+    return removeSsrcInfo;
+};
+
+/**
  * Tries to find {@link JitsiTrack} for given SSRC number. It will search both
  * local and remote tracks bound to this instance.
  * @param {number} ssrc
@@ -879,20 +923,29 @@ TraceablePeerConnection.prototype._createRemoteTrack = function(
     // Delete the existing track and create the new one because of a known bug on Safari.
     // RTCPeerConnection.ontrack fires when a new remote track is added but MediaStream.onremovetrack doesn't so
     // it needs to be removed whenever a new track is received for the same endpoint id.
-    if (existingTrack && browser.isSafari()) {
+    if (existingTrack && browser.isWebKitBased()) {
         this._remoteTrackRemoved(existingTrack.getOriginalStream(), existingTrack.getTrack());
     }
 
     if (existingTrack && existingTrack.getTrack() === track) {
-        // Ignore duplicated event which can originate either from
-        // 'onStreamAdded' or 'onTrackAdded'.
+        // Ignore duplicated event which can originate either from 'onStreamAdded' or 'onTrackAdded'.
         logger.info(
             `${this} ignored duplicated remote track added event for: `
                 + `${ownerEndpointId}, ${mediaType}`);
 
         return;
     } else if (existingTrack) {
-        logger.error(`${this} overwriting remote track for ${ownerEndpointId} ${mediaType}`);
+        logger.error(`${this} received a second remote track for ${ownerEndpointId} ${mediaType}, `
+            + 'deleting the existing track.');
+
+        // The exisiting track needs to be removed here. We can get here when Jicofo reverses the order of source-add
+        // and source-remove messages. Ideally, when a remote endpoint changes source, like switching devices, it sends
+        // a source-remove (for old ssrc) followed by a source-add (for new ssrc) and Jicofo then should forward these
+        // two messages to all the other endpoints in the conference in the same order. However, sometimes, these
+        // messages arrive at the client in the reverse order resulting in two remote tracks (of same media type) being
+        // created and in case of video, a black strip (that of the first track which has ended) appears over the live
+        // track obscuring it. Removing the existing track when that happens will fix this issue.
+        this._remoteTrackRemoved(existingTrack.getOriginalStream(), existingTrack.getTrack());
     }
 
     const remoteTrack
@@ -1869,11 +1922,15 @@ TraceablePeerConnection.prototype.findSenderForTrack = function(track) {
  */
 TraceablePeerConnection.prototype.replaceTrack = function(oldTrack, newTrack) {
     if (browser.usesUnifiedPlan()) {
+        logger.debug('TPC.replaceTrack using unified plan.');
+
         return this.tpcUtils.replaceTrack(oldTrack, newTrack)
 
             // renegotiate when SDP is used for simulcast munging
             .then(() => this.isSimulcastOn() && browser.usesSdpMungingForSimulcast());
     }
+
+    logger.debug('TPC.replaceTrack using plan B.');
 
     let promiseChain = Promise.resolve();
 
@@ -2115,20 +2172,18 @@ TraceablePeerConnection.prototype.setSenderVideoDegradationPreference = function
         return Promise.resolve();
     }
     const parameters = videoSender.getParameters();
+    const preference = localVideoTrack.videoType === VideoType.CAMERA
+        ? DEGRADATION_PREFERENCE_CAMERA
+        : this.options.capScreenshareBitrate && browser.usesPlanB()
 
-    if (!parameters.encodings || !parameters.encodings.length) {
-        return Promise.resolve();
-    }
-    for (const encoding in parameters.encodings) {
-        if (parameters.encodings.hasOwnProperty(encoding)) {
-            const preference = localVideoTrack.videoType === VideoType.CAMERA
-                ? DEGRADATION_PREFERENCE_CAMERA
-                : DEGRADATION_PREFERENCE_DESKTOP;
+            // Prefer resolution for low fps share.
+            ? DEGRADATION_PREFERENCE_DESKTOP
 
-            logger.info(`Setting video sender degradation preference on ${this} to ${preference}`);
-            parameters.encodings[encoding].degradationPreference = preference;
-        }
-    }
+            // Prefer frame-rate for high fps share.
+            : DEGRADATION_PREFERENCE_CAMERA;
+
+    logger.info(`Setting a degradation preference of ${preference} on local video track`);
+    parameters.degradationPreference = preference;
     this.tpcUtils.updateEncodingsResolution(parameters);
 
     return videoSender.setParameters(parameters);
@@ -2370,7 +2425,7 @@ TraceablePeerConnection.prototype.setSenderVideoConstraint = function(frameHeigh
         }
         this.tpcUtils.updateEncodingsResolution(parameters);
     } else if (newHeight > 0) {
-        // Do not scale down the desktop tracks until QualityController is able to propagate the sender constraints
+        // Do not scale down the desktop tracks until SendVideoController is able to propagate the sender constraints
         // only on the active media connection. Right now, the sender constraints received on the bridge channel
         // are propagated on both the jvb and p2p connections in cases where they both are active at the same time.
         parameters.encodings[0].scaleResolutionDownBy
@@ -2752,7 +2807,7 @@ TraceablePeerConnection.prototype.getStats = function(callback, errback) {
     // TODO (brian): After moving all browsers to adapter, check if adapter is
     // accounting for different getStats apis, making the browser-checking-if
     // unnecessary.
-    if (browser.isSafari() || browser.isFirefox() || browser.isReactNative()) {
+    if (browser.isWebKitBased() || browser.isFirefox() || browser.isReactNative()) {
         // uses the new Promise based getStats
         this.peerconnection.getStats()
             .then(callback)

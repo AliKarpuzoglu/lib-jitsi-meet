@@ -365,6 +365,10 @@ export class TPCUtils {
                     this.pc.localSSRCs.set(newTrack.rtcId, ssrc);
                 });
         }
+
+        logger.info('TPCUtils.replaceTrack called with no new track and no old track');
+
+        return Promise.resolve();
     }
 
     /**
@@ -446,7 +450,7 @@ export class TPCUtils {
      * @returns {void}
      */
     updateEncodingsResolution(parameters) {
-        if (!(browser.isSafari() && parameters.encodings && Array.isArray(parameters.encodings))) {
+        if (!(browser.isWebKitBased() && parameters.encodings && Array.isArray(parameters.encodings))) {
             return;
         }
         const allEqualEncodings

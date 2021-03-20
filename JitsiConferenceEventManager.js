@@ -92,7 +92,7 @@ JitsiConferenceEventManager.prototype.setupChatRoomListeners = function() {
             // TODO: Add a way to differentiate between commands which caused
             // us to mute and those that did not change our state (i.e. we were
             // already muted).
-            Statistics.sendAnalytics(createRemotelyMutedEvent());
+            Statistics.sendAnalytics(createRemotelyMutedEvent(MediaType.AUDIO));
 
             conference.mutedByFocusActor = actor;
 
@@ -107,6 +107,30 @@ JitsiConferenceEventManager.prototype.setupChatRoomListeners = function() {
                         conference.mutedByFocusActor = null;
                         logger.warn(
                             'Error while audio muting due to focus request', error);
+                    });
+        }
+    );
+
+    chatRoom.addListener(XMPPEvents.VIDEO_MUTED_BY_FOCUS,
+        actor => {
+            // TODO: Add a way to differentiate between commands which caused
+            // us to mute and those that did not change our state (i.e. we were
+            // already muted).
+            Statistics.sendAnalytics(createRemotelyMutedEvent(MediaType.VIDEO));
+
+            conference.mutedVideoByFocusActor = actor;
+
+            // set isVideoMutedByFocus when setVideoMute Promise ends
+            conference.rtc.setVideoMute(true).then(
+                () => {
+                    conference.isVideoMutedByFocus = true;
+                    conference.mutedVideoByFocusActor = null;
+                })
+                .catch(
+                    error => {
+                        conference.mutedVideoByFocusActor = null;
+                        logger.warn(
+                            'Error while video muting due to focus request', error);
                     });
         }
     );
@@ -466,16 +490,15 @@ JitsiConferenceEventManager.prototype.setupRTCListeners = function() {
         conference.onRemoteTrackRemoved.bind(conference));
 
     rtc.addListener(RTCEvents.DOMINANT_SPEAKER_CHANGED,
-        id => {
-            if (conference.lastDominantSpeaker !== id && conference.room) {
-                conference.lastDominantSpeaker = id;
+        (dominant, previous) => {
+            if (conference.lastDominantSpeaker !== dominant && conference.room) {
+                conference.lastDominantSpeaker = dominant;
                 conference.eventEmitter.emit(
-                    JitsiConferenceEvents.DOMINANT_SPEAKER_CHANGED, id);
+                    JitsiConferenceEvents.DOMINANT_SPEAKER_CHANGED, dominant, previous);
 
-                if (conference.statistics && conference.myUserId() === id) {
+                if (conference.statistics && conference.myUserId() === dominant) {
                     // We are the new dominant speaker.
-                    conference.statistics.sendDominantSpeakerEvent(
-                        conference.room.roomjid);
+                    conference.statistics.sendDominantSpeakerEvent(conference.room.roomjid);
                 }
             }
         });
@@ -608,7 +631,7 @@ JitsiConferenceEventManager.prototype.setupXMPPListeners = function() {
         const participant = conference.getParticipantById(Strophe.getResourceFromJid(from));
 
         if (participant) {
-            participant._features = features;
+            participant.setFeatures(features);
             conference.eventEmitter.emit(JitsiConferenceEvents.PARTCIPANT_FEATURES_CHANGED, participant);
         }
     };

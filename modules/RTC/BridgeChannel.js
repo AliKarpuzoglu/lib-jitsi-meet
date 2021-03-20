@@ -21,9 +21,8 @@ export default class BridgeChannel {
      * instance.
      * @param {string} [wsUrl] WebSocket URL.
      * @param {EventEmitter} emitter the EventEmitter instance to use for event emission.
-     * @param {function} senderVideoConstraintsChanged callback to call when the sender video constraints change.
      */
-    constructor(peerconnection, wsUrl, emitter, senderVideoConstraintsChanged) {
+    constructor(peerconnection, wsUrl, emitter) {
         if (!peerconnection && !wsUrl) {
             throw new TypeError('At least peerconnection or wsUrl must be given');
         } else if (peerconnection && wsUrl) {
@@ -52,8 +51,6 @@ export default class BridgeChannel {
 
         // Indicates whether the connection was closed from the client or not.
         this._closedFromClient = false;
-
-        this._senderVideoConstraintsChanged = senderVideoConstraintsChanged;
 
         // If a RTCPeerConnection is given, listen for new RTCDataChannel
         // event.
@@ -238,6 +235,19 @@ export default class BridgeChannel {
     }
 
     /**
+     * Sends a 'ReceiverVideoConstraints' message via the bridge channel.
+     *
+     * @param {ReceiverVideoConstraints} constraints video constraints.
+     */
+    sendNewReceiverVideoConstraintsMessage(constraints) {
+        logger.log(`Sending ReceiverVideoConstraints with ${JSON.stringify(constraints)}`);
+        this._send({
+            colibriClass: 'ReceiverVideoConstraints',
+            ...constraints
+        });
+    }
+
+    /**
      * Set events on the given RTCDataChannel or WebSocket instance.
      */
     _handleChannel(channel) {
@@ -280,11 +290,10 @@ export default class BridgeChannel {
 
             switch (colibriClass) {
             case 'DominantSpeakerEndpointChangeEvent': {
-                // Endpoint ID from the Videobridge.
-                const dominantSpeakerEndpoint = obj.dominantSpeakerEndpoint;
+                const { dominantSpeakerEndpoint, previousSpeakers = [] } = obj;
 
-                logger.info(`New dominant speaker: ${dominantSpeakerEndpoint}.`);
-                emitter.emit(RTCEvents.DOMINANT_SPEAKER_CHANGED, dominantSpeakerEndpoint);
+                logger.debug(`Dominant speaker: ${dominantSpeakerEndpoint}, previous speakers: ${previousSpeakers}`);
+                emitter.emit(RTCEvents.DOMINANT_SPEAKER_CHANGED, dominantSpeakerEndpoint, previousSpeakers);
                 break;
             }
             case 'EndpointConnectivityStatusChangeEvent': {
@@ -315,7 +324,7 @@ export default class BridgeChannel {
 
                 if (videoConstraints) {
                     logger.info(`SenderVideoConstraints: ${JSON.stringify(videoConstraints)}`);
-                    this._senderVideoConstraintsChanged(videoConstraints);
+                    emitter.emit(RTCEvents.SENDER_VIDEO_CONSTRAINTS_CHANGED, videoConstraints);
                 }
                 break;
             }

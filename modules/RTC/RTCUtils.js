@@ -97,7 +97,7 @@ const featureDetectionAudioEl = document.createElement('audio');
 const isAudioOutputDeviceChangeAvailable
     = typeof featureDetectionAudioEl.setSinkId !== 'undefined';
 
-let availableDevices;
+let availableDevices = [];
 let availableDevicesPollTimer;
 
 /**
@@ -105,27 +105,6 @@ let availableDevicesPollTimer;
  */
 function emptyFuncton() {
     // no-op
-}
-
-/**
- * Initialize wrapper function for enumerating devices.
- * TODO: remove this, it should no longer be needed.
- *
- * @returns {?Function}
- */
-function initEnumerateDevicesWithCallback() {
-    if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
-        return callback => {
-            navigator.mediaDevices.enumerateDevices()
-                .then(devices => {
-                    updateKnownDevices(devices);
-                    callback(devices);
-                }, () => {
-                    updateKnownDevices([]);
-                    callback([]);
-                });
-        };
-    }
 }
 
 /**
@@ -196,7 +175,7 @@ function getConstraints(um, options = {}) {
     // @see https://github.com/jitsi/lib-jitsi-meet/pull/136
     const isNewStyleConstraintsSupported
         = browser.isFirefox()
-            || browser.isSafari()
+            || browser.isWebKitBased()
             || browser.isReactNative();
 
     if (um.indexOf('video') >= 0) {
@@ -404,7 +383,7 @@ function newGetConstraints(um = [], options = {}) {
         // https://bugs.webkit.org/show_bug.cgi?id=210932
         // Camera doesn't start on older macOS versions if min/max constraints are specified.
         // TODO: remove this hack when the bug fix is available on Mojave, Sierra and High Sierra.
-        if (browser.isSafari()) {
+        if (browser.isWebKitBased()) {
             if (constraints.video.height && constraints.video.height.ideal) {
                 constraints.video.height = { ideal: clonedeep(constraints.video.height.ideal) };
             } else {
@@ -433,7 +412,7 @@ function newGetConstraints(um = [], options = {}) {
         }
 
         // Use the standard audio constraints on non-chromium browsers.
-        if (browser.isFirefox() || browser.isSafari()) {
+        if (browser.isFirefox() || browser.isWebKitBased()) {
             constraints.audio = {
                 deviceId: options.micDeviceId,
                 autoGainControl: !disableAGC && !disableAP,
@@ -798,11 +777,8 @@ class RTCUtils extends Listenable {
             logger.info(`Disable HPF: ${disableHPF}`);
         }
 
-        availableDevices = [];
         window.clearInterval(availableDevicesPollTimer);
         availableDevicesPollTimer = undefined;
-
-        this.enumerateDevices = initEnumerateDevicesWithCallback();
 
         if (browser.usesNewGumFlow()) {
             this.RTCPeerConnectionType = RTCPeerConnection;
@@ -839,7 +815,12 @@ class RTCUtils extends Listenable {
             throw new Error(message);
         }
 
-        this._initPCConstraints();
+        this.pcConstraints = browser.isChromiumBased() || browser.isReactNative()
+            ? { optional: [
+                { googScreencastMinBitrate: 100 },
+                { googCpuOveruseDetection: true }
+            ] }
+            : {};
 
         screenObtainer.init(
             options,
@@ -872,28 +853,20 @@ class RTCUtils extends Listenable {
     }
 
     /**
-     * Creates instance objects for peer connection constraints both for p2p
-     * and outside of p2p.
+     *
+     * @param {Function} callback
      */
-    _initPCConstraints() {
-        if (browser.isFirefox()) {
-            this.pcConstraints = {};
-        } else if (browser.isChromiumBased() || browser.isReactNative()) {
-            this.pcConstraints = { optional: [
-                { googHighStartBitrate: 0 },
-                { googPayloadPadding: true },
-                { googScreencastMinBitrate: 100 },
-                { googCpuOveruseDetection: true },
-                { googCpuOveruseEncodeUsage: true },
-                { googCpuUnderuseThreshold: 55 },
-                { googCpuOveruseThreshold: 85 }
-            ] };
-
-            this.p2pPcConstraints
-                = JSON.parse(JSON.stringify(this.pcConstraints));
-        }
-
-        this.p2pPcConstraints = this.p2pPcConstraints || this.pcConstraints;
+    enumerateDevices(callback) {
+        navigator.mediaDevices.enumerateDevices()
+            .then(devices => {
+                updateKnownDevices(devices);
+                callback(devices);
+            })
+            .catch(error => {
+                logger.warn(`Failed to  enumerate devices. ${error}`);
+                updateKnownDevices([]);
+                callback([]);
+            });
     }
 
     /* eslint-disable max-params */
@@ -1498,6 +1471,14 @@ class RTCUtils extends Listenable {
      */
     getCurrentlyAvailableMediaDevices() {
         return availableDevices;
+    }
+
+    /**
+     * Returns whether available devices have permissions granted
+     * @returns {Boolean}
+     */
+    arePermissionsGrantedForAvailableDevices() {
+        return availableDevices.some(device => Boolean(device.label));
     }
 
     /**

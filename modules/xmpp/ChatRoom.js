@@ -1382,14 +1382,26 @@ export default class ChatRoom extends Listenable {
 
     /**
      * Adds the key to the presence map, overriding any previous value.
-     * @param key
-     * @param values
+     * @param key The key to add or replace.
+     * @param values The new values.
+     * @returns {boolean|null} <tt>true</tt> if the operation succeeded or <tt>false</tt> when no add or replce was
+     * performed as the value was already there.
      */
-    addToPresence(key, values) {
+    addOrReplaceInPresence(key, values) {
         values.tagName = key;
+
+        const matchingNodes = this.presMap.nodes.filter(node => key === node.tagName);
+
+        // if we have found just one, let's check is it the same
+        if (matchingNodes.length === 1 && isEqual(matchingNodes[0], values)) {
+            return false;
+        }
+
         this.removeFromPresence(key);
         this.presMap.nodes.push(values);
         this.presenceUpdateTime = Date.now();
+
+        return true;
     }
 
     /**
@@ -1515,7 +1527,7 @@ export default class ChatRoom extends Listenable {
      * @param mute
      */
     addAudioInfoToPresence(mute) {
-        this.addToPresence(
+        return this.addOrReplaceInPresence(
             'audiomuted',
             {
                 attributes: { 'xmlns': 'http://jitsi.org/jitmeet/audio' },
@@ -1529,10 +1541,8 @@ export default class ChatRoom extends Listenable {
      * @param callback
      */
     sendAudioInfoPresence(mute, callback) {
-        this.addAudioInfoToPresence(mute);
-
         // FIXME resend presence on CONNECTED
-        this.sendPresence();
+        this.addAudioInfoToPresence(mute) && this.sendPresence();
         if (callback) {
             callback();
         }
@@ -1543,7 +1553,7 @@ export default class ChatRoom extends Listenable {
      * @param mute
      */
     addVideoInfoToPresence(mute) {
-        this.addToPresence(
+        return this.addOrReplaceInPresence(
             'videomuted',
             {
                 attributes: { 'xmlns': 'http://jitsi.org/jitmeet/video' },
@@ -1556,8 +1566,7 @@ export default class ChatRoom extends Listenable {
      * @param mute
      */
     sendVideoInfoPresence(mute) {
-        this.addVideoInfoToPresence(mute);
-        this.sendPresence();
+        this.addVideoInfoToPresence(mute) && this.sendPresence();
     }
 
     /**
@@ -1672,14 +1681,15 @@ export default class ChatRoom extends Listenable {
      * Mutes remote participant.
      * @param jid of the participant
      * @param mute
+     * @param mediaType
      */
-    muteParticipant(jid, mute) {
+    muteParticipant(jid, mute, mediaType) {
         logger.info('set mute', mute);
         const iqToFocus = $iq(
             { to: this.focusMucJid,
                 type: 'set' })
             .c('mute', {
-                xmlns: 'http://jitsi.org/jitmeet/audio',
+                xmlns: `http://jitsi.org/jitmeet/${mediaType}`,
                 jid
             })
             .t(mute.toString())
@@ -1707,6 +1717,31 @@ export default class ChatRoom extends Listenable {
 
         if (mute.length && mute.text() === 'true') {
             this.eventEmitter.emit(XMPPEvents.AUDIO_MUTED_BY_FOCUS, mute.attr('actor'));
+        } else {
+            // XXX Why do we support anything but muting? Why do we encode the
+            // value in the text of the element? Why do we use a separate XML
+            // namespace?
+            logger.warn('Ignoring a mute request which does not explicitly '
+                + 'specify a positive mute command.');
+        }
+    }
+
+    /**
+     * TODO: Document
+     * @param iq
+     */
+    onMuteVideo(iq) {
+        const from = iq.getAttribute('from');
+
+        if (from !== this.focusMucJid) {
+            logger.warn('Ignored mute from non focus peer');
+
+            return;
+        }
+        const mute = $(iq).find('mute');
+
+        if (mute.length && mute.text() === 'true') {
+            this.eventEmitter.emit(XMPPEvents.VIDEO_MUTED_BY_FOCUS, mute.attr('actor'));
         } else {
             // XXX Why do we support anything but muting? Why do we encode the
             // value in the text of the element? Why do we use a separate XML
