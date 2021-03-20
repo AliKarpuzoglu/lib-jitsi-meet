@@ -1471,6 +1471,32 @@ JitsiConference.prototype.grantOwner = function(id) {
 };
 
 /**
+ * Grant owner rights to the participant.
+ * @param {string} id id of the participant to grant owner rights to.
+ */
+JitsiConference.prototype.grantPermission = function(id, resource) {
+    const participant = this.getParticipantById(id);
+
+    if (!participant || !resource) {
+        return;
+    }
+    this.room.sendPermissionUpdate(participant.getJid(), resource, true);
+};
+
+/**
+ * Grant owner rights to the participant.
+ * @param {string} id id of the participant to grant owner rights to.
+ */
+JitsiConference.prototype.revokePermission = function(id, resource) {
+    const participant = this.getParticipantById(id);
+
+    if (!participant || !resource) {
+        return;
+    }
+    this.room.sendPermissionUpdate(participant.getJid(), resource, false);
+};
+
+/**
  * Kick participant from this conference.
  * @param {string} id id of the participant to kick
  */

@@ -866,6 +866,21 @@ export default class ChatRoom extends Listenable {
         this.eventEmitter.emit(XMPPEvents.SENDING_CHAT_MESSAGE, message);
     }
 
+    /**
+     * sends a permission Update for resource of participant identified by id
+     * @param {String} id id/muc resource of the target
+     * @param {PermissionName} resource
+     * @param {Boolean} allowed
+     */
+    sendPermissionUpdate(id, resource, allowed) {
+        const msg = $msg({ to: id,
+            type: 'permission' });
+
+        msg.c('resource', resource).up();
+        msg.c('allowed', String(allowed)).up();
+
+        this.connection.send(msg);
+    }
     /* eslint-disable max-params */
     /**
      * Send private text message to another participant of the conference
@@ -1039,6 +1054,19 @@ export default class ChatRoom extends Listenable {
             this.eventEmitter.emit(XMPPEvents.CHAT_ERROR_RECEIVED, errorMsg);
 
             return true;
+        } else if (type === 'permission') {
+            // one of true/false
+            const allowed = $(msg).find('>allowed').text();
+
+            // ressource in question - e.g. screenshare
+            const resource = $(msg).find('>resource').text();
+
+            if (resource && (allowed === 'true' || allowed === 'false')) {
+                this.eventEmitter.emit(XMPPEvents.PARTICIPANT_PERMISSION_CHANGED,
+                    from, this.myroomjid, resource, String(allowed) === 'true');
+            }
+
+            return;
         }
 
         const txt = $(msg).find('>body').text();
