@@ -3,9 +3,9 @@
 import { getLogger } from 'jitsi-meet-logger';
 
 import * as JitsiConferenceEvents from '../../JitsiConferenceEvents';
+import BridgeVideoType from '../../service/RTC/BridgeVideoType';
 import * as MediaType from '../../service/RTC/MediaType';
 import RTCEvents from '../../service/RTC/RTCEvents';
-import VideoType from '../../service/RTC/VideoType';
 import browser from '../browser';
 import Statistics from '../statistics/statistics';
 import GlobalOnErrorHandler from '../util/GlobalOnErrorHandler';
@@ -152,7 +152,7 @@ export default class RTC extends Listenable {
             = this._updateAudioOutputForAudioTracks.bind(this);
 
         // The default video type assumed by the bridge.
-        this._videoType = VideoType.NONE;
+        this._videoType = BridgeVideoType.NONE;
 
         // Switch audio output device on all remote audio tracks. Local audio
         // tracks handle this event by themselves.
@@ -209,7 +209,6 @@ export default class RTC extends Listenable {
     static obtainAudioAndVideoPermissions(options) {
         return RTCUtils.obtainAudioAndVideoPermissions(options)
             .then(tracksInfo => _createLocalTracks(tracksInfo));
-
     }
 
     /**
@@ -242,7 +241,7 @@ export default class RTC extends Listenable {
                 try {
                     this._channel.sendSelectedEndpointsMessage(this._selectedEndpoints);
                 } catch (error) {
-                    logError(error, 'SelectedEndpointsChangedEvent', this._selectedEndpoint);
+                    logError(error, 'SelectedEndpointsChangedEvent', this._selectedEndpoints);
                 }
             }
             if (typeof this._maxFrameHeight !== 'undefined') {
@@ -328,6 +327,15 @@ export default class RTC extends Listenable {
 
             this._channel = null;
         }
+    }
+
+    /**
+     * Sets the capture frame rate to be used for desktop tracks.
+     *
+     * @param {number} maxFps framerate to be used for desktop track capture.
+     */
+    setDesktopSharingFrameRate(maxFps) {
+        RTCUtils.setDesktopSharingFrameRate(maxFps);
     }
 
     /**
@@ -465,8 +473,6 @@ export default class RTC extends Listenable {
         if (options.enableInsertableStreams) {
             logger.debug('E2EE - setting insertable streams constraints');
             iceConfig.encodedInsertableStreams = true;
-            iceConfig.forceEncodedAudioInsertableStreams = true; // legacy, to be removed in M88.
-            iceConfig.forceEncodedVideoInsertableStreams = true; // legacy, to be removed in M88.
         }
 
         const supportsSdpSemantics = browser.isReactNative()

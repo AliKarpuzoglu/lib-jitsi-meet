@@ -15,6 +15,7 @@ import * as JitsiTrackEvents from './JitsiTrackEvents';
 import authenticateAndUpgradeRole from './authenticateAndUpgradeRole';
 import { CodecSelection } from './modules/RTC/CodecSelection';
 import RTC from './modules/RTC/RTC';
+import { SS_DEFAULT_FRAME_RATE } from './modules/RTC/ScreenObtainer';
 import browser from './modules/browser';
 import ConnectionQuality from './modules/connectivity/ConnectionQuality';
 import IceFailedHandling
@@ -49,6 +50,7 @@ import {
     FEATURE_JIGASI,
     JITSI_MEET_MUC_TYPE
 } from './modules/xmpp/xmpp';
+import BridgeVideoType from './service/RTC/BridgeVideoType';
 import CodecMimeType from './service/RTC/CodecMimeType';
 import * as MediaType from './service/RTC/MediaType';
 import VideoType from './service/RTC/VideoType';
@@ -184,7 +186,9 @@ export default function JitsiConference(options) {
      * Detects issues with the audio of remote participants.
      * @type {AudioOutputProblemDetector}
      */
-    this._audioOutputProblemDetector = new AudioOutputProblemDetector(this);
+    if (!options.config.disableAudioLevels) {
+        this._audioOutputProblemDetector = new AudioOutputProblemDetector(this);
+    }
 
     /**
      * Indicates whether the connection is interrupted or not.
@@ -419,7 +423,8 @@ JitsiConference.prototype._init = function(options = {}) {
             enableCallStats,
             roomName: this.options.name,
             applicationName: config.applicationName,
-            getWiFiStatsMethod: config.getWiFiStatsMethod
+            getWiFiStatsMethod: config.getWiFiStatsMethod,
+            configParams: config.callStatsConfigParams
         });
         Statistics.analytics.addPermanentProperties({
             'callstats_name': this._statsCurrentId
@@ -511,6 +516,14 @@ JitsiConference.prototype._init = function(options = {}) {
 
     // Publish the codec type to presence.
     this.setLocalParticipantProperty('codecType', this.codecSelection.getPreferredCodec());
+
+    // Set transcription language presence extension.
+    // In case the language config is undefined or has the default value that the transcriber uses
+    // (in our case Jigasi uses 'en-US'), don't set the participant property in order to avoid
+    // needlessly polluting the presence stanza.
+    if (config && config.transcriptionLanguage && config.transcriptionLanguage !== 'en-US') {
+        this.setLocalParticipantProperty('transcription_language', config.transcriptionLanguage);
+    }
 };
 
 /**
@@ -604,6 +617,8 @@ JitsiConference.prototype.leave = function() {
 
     this._delayedIceFailed && this._delayedIceFailed.cancel();
 
+    this._maybeClearSITimeout();
+
     // Close both JVb and P2P JingleSessions
     if (this.jvbJingleSession) {
         this.jvbJingleSession.close();
@@ -684,6 +699,24 @@ JitsiConference.prototype._getMediaSessions = function() {
     this.p2pJingleSession && sessions.push(this.p2pJingleSession);
 
     return sessions;
+};
+
+/**
+ * Sends the 'VideoTypeMessage' to the bridge on the bridge channel so that the bridge can make bitrate allocation
+ * decisions based on the video type of the local source.
+ *
+ * @param {JitsiLocalTrack} localtrack - The track associated with the local source signaled to the bridge.
+ * @returns {void}
+ * @private
+ */
+JitsiConference.prototype._sendBridgeVideoTypeMessage = function(localtrack) {
+    let videoType = !localtrack || localtrack.isMuted() ? BridgeVideoType.NONE : localtrack.getVideoType();
+
+    if (videoType === BridgeVideoType.DESKTOP && this._desktopSharingFrameRate > SS_DEFAULT_FRAME_RATE) {
+        videoType = BridgeVideoType.DESKTOP_HIGH_FPS;
+    }
+
+    this.rtc.setVideoType(videoType);
 };
 
 /**
@@ -1047,9 +1080,7 @@ JitsiConference.prototype._fireMuteChangeEvent = function(track) {
     // Send the video type message to the bridge if the track is not removed/added to the pc as part of
     // the mute/unmute operation. This currently happens only on Firefox.
     if (track.isVideoTrack() && !browser.doesVideoMuteByStreamRemove()) {
-        const videoType = track.isMuted() ? VideoType.NONE : track.getVideoType();
-
-        this.rtc.setVideoType(videoType);
+        this._sendBridgeVideoTypeMessage(track);
     }
 
     this.eventEmitter.emit(JitsiConferenceEvents.TRACK_MUTE_CHANGED, track, actorParticipant);
@@ -1063,9 +1094,23 @@ JitsiConference.prototype._fireMuteChangeEvent = function(track) {
  * @returns {Array<JitsiLocalTrack>} - list of local tracks that are unmuted.
  */
 JitsiConference.prototype._getInitialLocalTracks = function() {
+    // Always add the audio track on certain platforms:
+    //  * Safari / WebKit: because of a known issue where audio playout doesn't happen
+    //    if the user joins audio and video muted.
+    //  * React Native: after iOS 15, if a user joins muted they won't be able to unmute.
     return this.getLocalTracks()
-        .filter(track => (track.getType() === MediaType.AUDIO && !this.isStartAudioMuted())
-        || (track.getType() === MediaType.VIDEO && !this.isStartVideoMuted()));
+        .filter(track => {
+            const trackType = track.getType();
+
+            if (trackType === MediaType.AUDIO
+                    && (!this.isStartAudioMuted() || browser.isWebKitBased() || browser.isReactNative())) {
+                return true;
+            } else if (trackType === MediaType.VIDEO && !this.isStartVideoMuted()) {
+                return true;
+            }
+
+            return false;
+        });
 };
 
 /**
@@ -1110,8 +1155,10 @@ JitsiConference.prototype.removeTrack = function(track) {
  * @returns {Promise} resolves when the replacement is finished
  */
 JitsiConference.prototype.replaceTrack = function(oldTrack, newTrack) {
+    const oldTrackBelongsToConference = this === oldTrack?.conference;
+
     // First do the removal of the oldTrack at the JitsiConference level
-    if (oldTrack) {
+    if (oldTrackBelongsToConference) {
         if (oldTrack.disposed) {
             return Promise.reject(
                 new JitsiTrackError(JitsiTrackErrors.TRACK_IS_DISPOSED));
@@ -1124,29 +1171,32 @@ JitsiConference.prototype.replaceTrack = function(oldTrack, newTrack) {
         }
     }
 
+    if (oldTrack && !oldTrackBelongsToConference) {
+        logger.warn(`JitsiConference.replaceTrack oldTrack (${oldTrack} does not belong to this conference`);
+    }
+
     // Now replace the stream at the lower levels
-    return this._doReplaceTrack(oldTrack, newTrack)
+    return this._doReplaceTrack(oldTrackBelongsToConference ? oldTrack : null, newTrack)
         .then(() => {
-            if (oldTrack) {
-                this.onLocalTrackRemoved(oldTrack);
+            oldTrackBelongsToConference && this.onLocalTrackRemoved(oldTrack);
+            newTrack && this._setupNewTrack(newTrack);
+
+            // Send 'VideoTypeMessage' on the bridge channel when a video track is added/removed.
+            if ((oldTrackBelongsToConference && oldTrack?.isVideoTrack()) || newTrack?.isVideoTrack()) {
+                this._sendBridgeVideoTypeMessage(newTrack);
             }
 
-            // Send 'VideoTypeMessage' on the bridge channel for the new track.
-            if (newTrack) {
-                // Now handle the addition of the newTrack at the JitsiConference level
-                this._setupNewTrack(newTrack);
-                newTrack.isVideoTrack() && this.rtc.setVideoType(newTrack.getVideoType());
-            } else {
-                oldTrack && oldTrack.isVideoTrack() && this.rtc.setVideoType(VideoType.NONE);
-            }
-
-            if (this.isMutedByFocus || this.isVideoMutedByFocus) {
+            if (newTrack !== null && (this.isMutedByFocus || this.isVideoMutedByFocus)) {
                 this._fireMuteChangeEvent(newTrack);
             }
 
             return Promise.resolve();
         })
-        .catch(error => Promise.reject(new Error(error)));
+        .catch(error => {
+            logger.error(`replaceTrack failed: ${error?.stack}`);
+
+            return Promise.reject(error);
+        });
 };
 
 /**
@@ -1259,7 +1309,7 @@ JitsiConference.prototype._addLocalTrackAsUnmute = function(track) {
     return Promise.allSettled(addAsUnmutePromises)
         .then(() => {
             // Signal the video type to the bridge.
-            track.isVideoTrack() && this.rtc.setVideoType(track.getVideoType());
+            track.isVideoTrack() && this._sendBridgeVideoTypeMessage(track);
         });
 };
 
@@ -1287,7 +1337,7 @@ JitsiConference.prototype._removeLocalTrackAsMute = function(track) {
     return Promise.allSettled(removeAsMutePromises)
         .then(() => {
             // Signal the video type to the bridge.
-            track.isVideoTrack() && this.rtc.setVideoType(VideoType.NONE);
+            track.isVideoTrack() && this._sendBridgeVideoTypeMessage();
         });
 };
 
@@ -1761,8 +1811,10 @@ JitsiConference.prototype.onMemberLeft = function(jid) {
                 this.eventEmitter.emit(JitsiConferenceEvents.USER_LEFT, id, participant);
             }
 
-            this._maybeStartOrStopP2P(true /* triggered by user left event */);
-            this._maybeClearSITimeout();
+            if (this.room !== null) { // Skip if we have left the room already.
+                this._maybeStartOrStopP2P(true /* triggered by user left event */);
+                this._maybeClearSITimeout();
+            }
         });
 };
 
@@ -2019,7 +2071,7 @@ JitsiConference.prototype.onIncomingCall = function(
     if (jingleSession.isP2P) {
         this._onIncomingCallP2P(jingleSession, jingleOffer);
     } else {
-        if (!this.room.isFocus(jingleSession.remoteJid)) {
+        if (!this.isFocus(jingleSession.remoteJid)) {
             const description = 'Rejecting session-initiate from non-focus.';
 
             this._rejectIncomingCall(
@@ -2114,6 +2166,10 @@ JitsiConference.prototype._acceptJvbIncomingCall = function(
             },
             localTracks
         );
+
+        // Enable or disable simulcast for plan-b screensharing based on the capture fps if it is set through the UI.
+        this._desktopSharingFrameRate
+            && jingleSession.peerconnection.setDesktopSharingFrameRate(this._desktopSharingFrameRate);
 
         // Start callstats as soon as peerconnection is initialized,
         // do not wait for XMPPEvents.PEERCONNECTION_READY, as it may never
@@ -2620,14 +2676,13 @@ JitsiConference.prototype.sendApplicationLog = function(message) {
 };
 
 /**
- * Checks if the user identified by given <tt>mucJid</tt> is the conference
- * focus.
+ * Checks if the user identified by given <tt>mucJid</tt> is the conference focus.
  * @param mucJid the full MUC address of the user to be checked.
  * @returns {boolean|null} <tt>true</tt> if MUC user is the conference focus,
  * <tt>false</tt> when is not. <tt>null</tt> if we're not in the MUC anymore and
  * are unable to figure out the status or if given <tt>mucJid</tt> is invalid.
  */
-JitsiConference.prototype._isFocus = function(mucJid) {
+JitsiConference.prototype.isFocus = function(mucJid) {
     return this.room ? this.room.isFocus(mucJid) : null;
 };
 
@@ -3432,6 +3487,29 @@ JitsiConference.prototype.getP2PConnectionState = function() {
     return null;
 };
 
+/**
+ * Configures the peerconnection so that a given framre rate can be achieved for desktop share.
+ *
+ * @param {number} maxFps The capture framerate to be used for desktop tracks.
+ * @returns {boolean} true if the operation is successful, false otherwise.
+ */
+JitsiConference.prototype.setDesktopSharingFrameRate = function(maxFps) {
+    if (typeof maxFps !== 'number' || isNaN(maxFps)) {
+        logger.error(`Invalid value ${maxFps} specified for desktop capture frame rate`);
+
+        return false;
+    }
+
+    this._desktopSharingFrameRate = maxFps;
+
+    // Enable or disable simulcast for plan-b screensharing based on the capture fps.
+    this.jvbJingleSession && this.jvbJingleSession.peerconnection.setDesktopSharingFrameRate(maxFps);
+
+    // Set the capture rate for desktop sharing.
+    this.rtc.setDesktopSharingFrameRate(maxFps);
+
+    return true;
+};
 
 /**
  * Manually starts new P2P session (should be used only in the tests).

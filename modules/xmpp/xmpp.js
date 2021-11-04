@@ -175,7 +175,7 @@ export default class XMPP extends Listenable {
 
         this._initStrophePlugins();
 
-        this.caps = new Caps(this.connection, this.options.clientNode);
+        this.caps = new Caps(this.connection, /* clientNode */ 'https://jitsi.org/jitsi-meet');
 
         // Initialize features advertised in disco-info
         this.initFeaturesList();
@@ -206,6 +206,7 @@ export default class XMPP extends Listenable {
         this.caps.addFeature('urn:xmpp:jingle:transports:dtls-sctp:1');
         this.caps.addFeature('urn:xmpp:jingle:apps:rtp:audio');
         this.caps.addFeature('urn:xmpp:jingle:apps:rtp:video');
+        this.caps.addFeature('http://jitsi.org/json-encoded-sources');
 
         // Disable RTX on Firefox 83 and older versions because of
         // https://bugzilla.mozilla.org/show_bug.cgi?id=1668028
@@ -440,6 +441,10 @@ export default class XMPP extends Listenable {
                         .catch(e => logger.warn('Error getting features from lobby.', e && e.message));
                 }
             }
+
+            if (identity.type === 'shard') {
+                this.options.deploymentInfo.shard = this.connection.shard = identity.name;
+            }
         });
 
         if (this.avModerationComponentAddress
@@ -541,13 +546,6 @@ export default class XMPP extends Listenable {
         const { features, identities } = parseDiscoInfo(msg);
 
         this._processDiscoInfoIdentities(identities, features);
-
-        // check for shard name in identities
-        identities.forEach(i => {
-            if (i.type === 'shard') {
-                this.options.deploymentInfo.shard = i.name;
-            }
-        });
 
         if (foundIceServers || identities.size > 0 || features.size > 0) {
             this.connection._stropheConn.deleteHandler(this._sysMessageHandler);
